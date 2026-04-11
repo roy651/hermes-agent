@@ -1105,7 +1105,14 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
         def _process_job(job: dict) -> bool:
             """Run one due job end-to-end: execute, save, deliver, mark."""
             try:
-                success, output, final_response, error = run_job(job)
+                try:
+                    success, output, final_response, error = run_job(job)
+                except TimeoutError:
+                    logger.warning(
+                        "Job %s timed out on first attempt — retrying once",
+                        job.get("name", job["id"]),
+                    )
+                    success, output, final_response, error = run_job(job)
 
                 output_file = save_job_output(job["id"], output)
                 if verbose:

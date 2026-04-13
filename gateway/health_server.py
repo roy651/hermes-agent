@@ -49,11 +49,16 @@ async def start_health_server(runner: "GatewayRunner", port: int = HEALTH_PORT) 
                 longest = duration
 
         status = "processing" if sessions else "idle"
+        telegram_polling = any(
+            t.get_name() == "Updater:start_polling:polling_task" and not t.done()
+            for t in asyncio.all_tasks()
+        )
         return web.json_response({
             "status": status,
             "active_sessions": len(sessions),
             "longest_running_seconds": round(longest, 1),
             "sessions": sessions,
+            "telegram_polling": telegram_polling,
         })
 
     app = web.Application()

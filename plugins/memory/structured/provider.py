@@ -18,43 +18,59 @@ _TOOL_SCHEMA: Dict[str, Any] = {
     "description": (
         "Read or write structured long-term memory organized per skill or infra area.\n\n"
         "Actions:\n"
-        "  add              — persist a typed entry (requires: target, type, content, why, apply)\n"
+        "  add              — append a typed entry (requires: target, type, content, why, apply)\n"
+        "  replace          — update an existing entry in-place (requires: target, match, type, content, why, apply)\n"
+        "  remove           — delete an entry (requires: target, match)\n"
         "  read             — load a memory file (requires: target, e.g. 'skills/navman')\n"
         "  list             — show all files and the routing index\n"
-        "  create_file      — create a new file for a new skill/area (requires: target; "
-                             "provide description and keywords for routing)\n"
+        "  create_file      — create a new file for a new skill/area (requires: target;\n"
+        "                     optionally: description, keywords)\n"
         "  list_pending_sessions — list short-term sessions awaiting distillation\n"
         "  read_session     — read a full short-term session (requires: session_id)\n"
         "  mark_distilled   — archive a processed session (requires: session_id)\n\n"
-        "Write to long-term for: architectural decisions, bug root causes and fixes, "
+        "Prefer 'replace' over 'add' when a fact supersedes an existing entry — avoid accumulating\n"
+        "duplicates. Use 'remove' when an entry is fully obsolete.\n"
+        "For 'replace'/'remove': 'match' must be a short unique substring from the target entry's\n"
+        "content field. If ambiguous, use a longer substring.\n\n"
+        "Write to long-term for: architectural decisions, bug root causes and fixes,\n"
         "user preferences per skill, key behavioral constraints discovered.\n"
-        "Always fill 'why' (what caused this learning) and 'apply' (when/how to use it)."
+        "Always fill 'why' (root cause or context) and 'apply' (when/how to use it)."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "read", "list", "create_file",
-                         "list_pending_sessions", "read_session", "mark_distilled"],
+                "enum": [
+                    "add", "replace", "remove",
+                    "read", "list", "create_file",
+                    "list_pending_sessions", "read_session", "mark_distilled",
+                ],
             },
             "target": {
                 "type": "string",
                 "description": "Memory file, e.g. 'skills/navman' or 'infra/gateway'.",
             },
+            "match": {
+                "type": "string",
+                "description": (
+                    "Short unique substring from the existing entry's content to identify it. "
+                    "Required for 'replace' and 'remove'. Case-insensitive."
+                ),
+            },
             "type": {
                 "type": "string",
                 "enum": ["feedback", "project", "reference", "user"],
-                "description": "Entry type. Required for 'add'.",
+                "description": "Entry type. Required for 'add' and 'replace'.",
             },
             "content": {"type": "string", "description": "The fact to remember."},
             "why": {"type": "string", "description": "Why this matters / root cause."},
-            "apply": {"type": "string", "description": "When and how to use this in future."},
+            "apply": {"type": "string", "description": "When and how to apply this in future."},
             "description": {"type": "string", "description": "Short description. For 'create_file'."},
             "keywords": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Routing keywords. For 'create_file'.",
+                "description": "Routing keywords for INDEX.md. For 'create_file'.",
             },
             "session_id": {"type": "string", "description": "For 'read_session' / 'mark_distilled'."},
         },
@@ -62,7 +78,6 @@ _TOOL_SCHEMA: Dict[str, Any] = {
     },
 }
 
-# Contexts where we do NOT write short-term session data (cron jobs other than dreaming)
 _SKIP_SESSION_CONTEXTS = {"flush", "subagent"}
 
 
@@ -74,7 +89,7 @@ class StructuredMemoryProvider(MemoryProvider):
         return "structured"
 
     def is_available(self) -> bool:
-        return True  # local only, no credentials needed
+        return True
 
     def initialize(self, session_id: str, **kwargs) -> None:
         from .store import StructuredStore
@@ -108,6 +123,7 @@ class StructuredMemoryProvider(MemoryProvider):
             "## Structured Long-Term Memory\n"
             f"Available memory files:\n{file_lines}\n\n"
             "Use `structured_memory` to read context or write learnings. "
+            "Prefer 'replace' when updating an existing fact — avoid duplicates. "
             "Write when you discover: architectural decisions, bug root causes, "
             "user preferences for a skill, or key behavioral constraints. "
             "Every entry needs: target, type, content, why, apply."
@@ -123,7 +139,6 @@ class StructuredMemoryProvider(MemoryProvider):
         for target in topics[:2]:
             content = self._store.read_long_term(target)
             if content and content.strip():
-                # Tail to stay lightweight in the context window
                 excerpt = content[-1800:] if len(content) > 1800 else content
                 parts.append(f"[Memory: {target}]\n{excerpt}")
         for s in self._store.get_recent_sessions(topics=topics, limit=1):
@@ -147,9 +162,7 @@ class StructuredMemoryProvider(MemoryProvider):
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         if self._capture_session and messages:
-            self._session_notes.append(
-                f"[compression: {len(messages)} messages condensed]"
-            )
+            self._session_notes.append(f"[compression: {len(messages)} messages condensed]")
         return ""
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
@@ -188,6 +201,10 @@ class StructuredMemoryProvider(MemoryProvider):
         try:
             if action == "add":
                 return self._add(args)
+            if action == "replace":
+                return self._replace(args)
+            if action == "remove":
+                return self._remove(args)
             if action == "read":
                 return self._read(args)
             if action == "list":
@@ -197,8 +214,7 @@ class StructuredMemoryProvider(MemoryProvider):
             if action == "list_pending_sessions":
                 return json.dumps({"pending": self._store.list_pending_sessions()})
             if action == "read_session":
-                sid = args.get("session_id", "")
-                data = self._store.read_session(sid)
+                data = self._store.read_session(args.get("session_id", ""))
                 return json.dumps(data or {"error": "session not found"})
             if action == "mark_distilled":
                 sid = args.get("session_id", "")
@@ -213,11 +229,30 @@ class StructuredMemoryProvider(MemoryProvider):
         for field in ("target", "type", "content", "why", "apply"):
             if not args.get(field):
                 return json.dumps({"error": f"Missing required field: {field}"})
-        self._store.write_long_term_entry(args["target"], {
-            k: args[k] for k in ("type", "content", "why", "apply")
-        })
+        self._store.write_long_term_entry(args["target"], {k: args[k] for k in ("type", "content", "why", "apply")})
         self._session_notes.append(f"[wrote {args['type']} → {args['target']}]: {args['content'][:150]}")
         return json.dumps({"ok": True, "target": args["target"], "type": args["type"]})
+
+    def _replace(self, args: Dict[str, Any]) -> str:
+        for field in ("target", "match", "type", "content", "why", "apply"):
+            if not args.get(field):
+                return json.dumps({"error": f"Missing required field: {field}"})
+        ok, msg = self._store.replace_long_term_entry(
+            args["target"], args["match"],
+            {k: args[k] for k in ("type", "content", "why", "apply")},
+        )
+        if ok:
+            self._session_notes.append(f"[replaced in {args['target']}]: {args['content'][:150]}")
+        return json.dumps({"ok": ok, "message": msg})
+
+    def _remove(self, args: Dict[str, Any]) -> str:
+        for field in ("target", "match"):
+            if not args.get(field):
+                return json.dumps({"error": f"Missing required field: {field}"})
+        ok, msg = self._store.remove_long_term_entry(args["target"], args["match"])
+        if ok:
+            self._session_notes.append(f"[removed from {args['target']}]: matched {args['match'][:80]}")
+        return json.dumps({"ok": ok, "message": msg})
 
     def _read(self, args: Dict[str, Any]) -> str:
         target = args.get("target", "")
@@ -237,8 +272,7 @@ class StructuredMemoryProvider(MemoryProvider):
         if not target:
             return json.dumps({"error": "target required"})
         result = self._store.create_long_term_file(target, args.get("description", ""))
-        keywords = args.get("keywords", [])
-        if keywords:
+        if keywords := args.get("keywords", []):
             self._router.add_file(target, keywords)
         return json.dumps({"ok": True, "result": result})
 

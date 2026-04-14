@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 ENTRY_SEP = "\n---\n"
 DATE_FMT = "%Y-%m-%d"
@@ -24,13 +25,57 @@ class StructuredStore:
         for d in (self.long_term / "skills", self.long_term / "infra", self.sessions_dir):
             d.mkdir(parents=True, exist_ok=True)
 
-    # ── Long-term ────────────────────────────────────────────────────────────
+    # ── Long-term: path helpers ──────────────────────────────────────────────
 
     def _lt_path(self, target: str) -> Path:
         """'skills/navman' or 'infra/gateway' → absolute .md path."""
         parts = target.strip("/").split("/", 1)
         category, name = (parts[0], parts[1]) if len(parts) == 2 else ("infra", parts[0])
         return self.long_term / category / f"{name}.md"
+
+    # ── Long-term: entry parsing ─────────────────────────────────────────────
+
+    def _parse_entries(self, text: str) -> Tuple[str, List[str]]:
+        """Split a long-term file into (header, [entry, ...]).
+
+        Header is the # title line (and optional description).
+        Each entry is one typed block (type/date/content/why/apply).
+        """
+        chunks = text.split("\n---\n")
+        first = chunks[0]
+
+        # The first chunk may contain the header + first entry, or just the header.
+        m = re.search(r"\ntype:", first)
+        if m:
+            header = first[: m.start()]
+            entries = [first[m.start() + 1 :]] + [c.strip("\n") for c in chunks[1:]]
+        else:
+            header = first
+            entries = [c.strip("\n") for c in chunks[1:]]
+
+        return header, [e for e in entries if e.strip()]
+
+    def _reconstruct(self, header: str, entries: List[str]) -> str:
+        """Rebuild file text from header + entry list."""
+        parts = [header.rstrip()] + [e.strip() for e in entries if e.strip()]
+        if len(parts) == 1:
+            return parts[0] + "\n"
+        result = parts[0] + "\n\n" + parts[1]
+        for part in parts[2:]:
+            result = result.rstrip() + "\n\n---\n\n" + part
+        return result.rstrip() + "\n"
+
+    def _make_block(self, entry: Dict[str, str]) -> str:
+        date = datetime.now(timezone.utc).strftime(DATE_FMT)
+        return (
+            f"type: {entry['type']}\n"
+            f"date: {date}\n"
+            f"content: {entry['content']}\n"
+            f"why: {entry['why']}\n"
+            f"apply: {entry['apply']}\n"
+        )
+
+    # ── Long-term: CRUD ──────────────────────────────────────────────────────
 
     def read_long_term(self, target: str) -> str:
         path = self._lt_path(target)
@@ -39,14 +84,7 @@ class StructuredStore:
     def write_long_term_entry(self, target: str, entry: Dict[str, str]) -> None:
         path = self._lt_path(target)
         path.parent.mkdir(parents=True, exist_ok=True)
-        date = datetime.now(timezone.utc).strftime(DATE_FMT)
-        block = (
-            f"type: {entry['type']}\n"
-            f"date: {date}\n"
-            f"content: {entry['content']}\n"
-            f"why: {entry['why']}\n"
-            f"apply: {entry['apply']}\n"
-        )
+        block = self._make_block(entry)
         with self._lock:
             if path.exists():
                 existing = path.read_text(encoding="utf-8")
@@ -54,6 +92,53 @@ class StructuredStore:
             else:
                 name = target.split("/")[-1]
                 path.write_text(f"# {name}\n\n{block}", encoding="utf-8")
+
+    def replace_long_term_entry(
+        self, target: str, match: str, new_entry: Dict[str, str]
+    ) -> Tuple[bool, str]:
+        """Replace the entry whose content contains `match` with `new_entry`.
+
+        Returns (ok, message). Fails if 0 or 2+ entries match (ambiguous).
+        """
+        path = self._lt_path(target)
+        if not path.exists():
+            return False, f"File '{target}' not found."
+        with self._lock:
+            text = path.read_text(encoding="utf-8")
+            header, entries = self._parse_entries(text)
+            hits = [i for i, e in enumerate(entries) if match.lower() in e.lower()]
+            if not hits:
+                return False, f"No entry found containing: {match!r}"
+            if len(hits) > 1:
+                return False, (
+                    f"{len(hits)} entries match {match!r} — use a more specific substring."
+                )
+            entries[hits[0]] = self._make_block(new_entry)
+            path.write_text(self._reconstruct(header, entries), encoding="utf-8")
+        return True, f"Replaced entry in '{target}'."
+
+    def remove_long_term_entry(self, target: str, match: str) -> Tuple[bool, str]:
+        """Remove the entry whose content contains `match`.
+
+        Returns (ok, message). Fails if 0 or 2+ entries match.
+        """
+        path = self._lt_path(target)
+        if not path.exists():
+            return False, f"File '{target}' not found."
+        with self._lock:
+            text = path.read_text(encoding="utf-8")
+            header, entries = self._parse_entries(text)
+            hits = [i for i, e in enumerate(entries) if match.lower() in e.lower()]
+            if not hits:
+                return False, f"No entry found containing: {match!r}"
+            if len(hits) > 1:
+                return False, (
+                    f"{len(hits)} entries match {match!r} — use a more specific substring."
+                )
+            removed = entries.pop(hits[0])
+            path.write_text(self._reconstruct(header, entries), encoding="utf-8")
+        preview = removed.strip()[:80]
+        return True, f"Removed entry from '{target}': {preview}..."
 
     def create_long_term_file(self, target: str, description: str = "") -> str:
         path = self._lt_path(target)
@@ -91,7 +176,9 @@ class StructuredStore:
         """Recent non-archived sessions that share any of the given topic targets."""
         results: List[Dict[str, Any]] = []
         topic_set = set(topics)
-        paths = sorted(self.sessions_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        paths = sorted(
+            self.sessions_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True
+        )
         for p in paths:
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))

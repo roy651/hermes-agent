@@ -2155,6 +2155,7 @@ class GatewayRunner:
             logger.info("%s hook(s) loaded", hook_count)
         await self.hooks.emit("gateway:startup", {
             "platforms": [p.value for p in self.adapters.keys()],
+            "runner": self,
         })
         
         if connected_count > 0:
@@ -10944,10 +10945,6 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     )
     cron_thread.start()
 
-    # Start always-on health server (no config required)
-    from gateway.health_server import start_health_server
-    health_task = asyncio.create_task(start_health_server(runner))
-
     # Wait for shutdown
     await runner.wait_for_shutdown()
 
@@ -10956,12 +10953,7 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             logger.error("Gateway exiting with failure: %s", runner.exit_reason)
         return False
     
-    # Stop health server and cron ticker cleanly
-    health_task.cancel()
-    try:
-        await health_task
-    except Exception:
-        pass
+    # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
 

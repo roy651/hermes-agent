@@ -14408,9 +14408,14 @@ class GatewayRunner:
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
                     transcript = result["transcript"]
+                    # Display transcript prominently for user visibility (Telegram-compatible)
                     enriched_parts.append(
-                        f'[The user sent a voice message~ '
-                        f'Here\'s what they said: "{transcript}"]'
+                        f"**Voice Message Transcript:**\n\n{transcript}\n\n---"
+                    )
+                    
+                    # Also add the hidden format for compatibility
+                    enriched_parts.append(
+                        f'[The user sent a voice message~ Here\'s what they said: "{transcript}"]'
                     )
                 else:
                     error = result.get("error", "unknown error")

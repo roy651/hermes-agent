@@ -1,0 +1,4 @@
+name: voice-transcript
+description: Show the STT transcript prominently in the chat when the user sends a voice message. Add-on replacement for the gateway/run.py core change.
+events:
+  - gateway:startup

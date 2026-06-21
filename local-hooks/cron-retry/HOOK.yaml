@@ -1,0 +1,4 @@
+name: cron-retry
+description: Retry a cron job once on TimeoutError during execution. Add-on replacement for the core _process_job retry.
+events:
+  - gateway:startup

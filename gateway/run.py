@@ -12786,13 +12786,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if result["success"]:
                     transcript = result["transcript"]
                     successful_transcripts.append(transcript)
-                    # Display transcript prominently for user visibility
                     enriched_parts.append(
-                        f"**Voice Message Transcript:**\n\n{transcript}\n\n---"
-                    )
-                    # Also add the hidden format for compatibility
-                    enriched_parts.append(
-                        f'[The user sent a voice message~ Here\'s what they said: "{transcript}"]'
+                        f'[The user sent a voice message~ '
+                        f'Here\'s what they said: "{transcript}"]'
                     )
                 else:
                     error = result.get("error", "unknown error")

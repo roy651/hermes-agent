@@ -2412,52 +2412,11 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
             )
 
         def _process_job(job: dict) -> bool:
-            """Run one due job end-to-end: execute, save, deliver, mark."""
-            try:
-                try:
-                    success, output, final_response, error = run_job(job)
-                except TimeoutError:
-                    logger.warning(
-                        "Job %s timed out on first attempt — retrying once",
-                        job.get("name", job["id"]),
-                    )
-                    success, output, final_response, error = run_job(job)
-
-                output_file = save_job_output(job["id"], output)
-                if verbose:
-                    logger.info("Output saved to: %s", output_file)
-
-                # Deliver the final response to the origin/target chat.
-                # If the agent responded with [SILENT], skip delivery (but
-                # output is already saved above).  Failed jobs always deliver.
-                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
-                should_deliver = bool(deliver_content)
-                if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
-                    logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
-                    should_deliver = False
-
-                delivery_error = None
-                if should_deliver:
-                    try:
-                        delivery_error = _deliver_result(job, deliver_content, adapters=adapters, loop=loop)
-                    except Exception as de:
-                        delivery_error = str(de)
-                        logger.error("Delivery failed for job %s: %s", job["id"], de)
-
-                # Treat empty final_response as a soft failure so last_status
-                # is not "ok" — the agent ran but produced nothing useful.
-                # (issue #8585)
-                if success and not final_response:
-                    success = False
-                    error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
-
-                mark_job_run(job["id"], success, error, delivery_error=delivery_error)
-                return True
-
-            except Exception as e:
-                logger.error("Error processing job %s: %s", job['id'], e)
-                mark_job_run(job["id"], False, str(e))
-                return False
+            """Run one due job end-to-end. Thin wrapper around the shared
+            module-level ``run_one_job`` so ``tick`` and external providers
+            (Chronos ``fire_due``) use the identical execute→save→deliver→mark
+            body."""
+            return run_one_job(job, adapters=adapters, loop=loop, verbose=verbose)
 
         # Partition due jobs: those with a per-job workdir mutate
         # os.environ["TERMINAL_CWD"] inside run_job, which is process-global —
